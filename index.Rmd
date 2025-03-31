@@ -1,0 +1,455 @@
+---
+title: "My Techno analysis"
+output:
+  flexdashboard::flex_dashboard:
+    storyboard: true
+    theme: bootstrap
+    vertical_layout: fill
+
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+source('compmus.R')
+library(rjson)
+library(ggdendro)
+library(heatmaply)
+library(tidymodels)
+library(htmltools)
+library(patchwork)
+```
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+### Introduction
+
+``` {r, introduction}
+text_content <- tags$div(
+tags$p("This dashboard is an analysis of the corpus made up from songs sent in by all students that follow the course Computational Social science. Many of the songs in this corpus have been created with Generative-AI (Gen-AI), others are people their own work or simply someones favourite song. 
+
+
+I have chosen to pick two existing songs instead of generating my own. When starting this course I really wanted to do analysis on Techno, and when I tried to generate that with AI it didn't sound too well, so I decided to pick two of my favourite songs. These Dj's make enough money anyways, however I did make sure to select tracks that have a free download option."),
+tags$p("Below you can listen to the two tracks I picked and did most of my analysis on."),
+tags$p("Track 1 is called Make your transition by Omaks, this song questions your life choices, together with the loud and rolling kicks this makes for an almost psychadelic experience, espescially when listening to it at a big rave."),
+tags$p("Track 2 is called Rampage -VIP mix by Bollman, this is a harder mix of his original song, which is one of my all time favourite tracks to be played at a festival. It borders hardcore instead of Hardtechno, but that is becoming more and more normal at those festivals these days.
+       
+The analysis will start of with the class corpus, revealing what kind of music it consists of. Many songs present in this corpus have been created by Gen-AI, so it will be interesting to find out how these hold up with human made music. After this I will dive deeper in the songs I sent in and displayed on this page. As these are modern day Hard Techno songs, I dont expect them to hold up very well in the visualisations, since those are designed for music with more instruments and/or vocals.")
+
+)
+
+audio_player <- function(file) {
+tags$audio(
+src = file,
+type = "audio/mp3",
+controls = "controls"
+)
+}
+
+
+track1_player <- audio_player("C:\\Users\\lucas\\OneDrive\\Documents\\CompMusic Repo\\Lucas-W-1.mp3")
+track2_player <- audio_player("C:\\Users\\lucas\\OneDrive\\Documents\\CompMusic Repo\\Lucas-W-2.mp3")
+
+
+HTML(as.character(tagList(
+text_content,
+
+tags$h4("Track 1"),
+track1_player,
+
+tags$h4("Track 2"),
+track2_player
+)))
+
+
+```
+
+
+### Classification
+
+```{r, classification}
+compmus2025 <- read_csv("compmus2025.csv")
+
+get_conf_mat <- function(fit) {
+  outcome <- .get_tune_outcome_names(fit)
+  fit |> 
+    collect_predictions() |> 
+    conf_mat(truth = outcome, estimate = .pred_class)
+}  
+
+get_pr <- function(fit) {
+  fit |> 
+    conf_mat_resampled() |> 
+    group_by(Prediction) |> mutate(precision = Freq / sum(Freq)) |> 
+    group_by(Truth) |> mutate(recall = Freq / sum(Freq)) |> 
+    ungroup() |> filter(Prediction == Truth) |> 
+    select(class = Prediction, precision, recall)
+}  
+
+compmus2025_filtered <- 
+  compmus2025 |> filter(!is.na(ai)) |> 
+  mutate(ai = factor(if_else(ai, "AI", "Non-AI")))
+
+classification_recipe <-
+  recipe(
+    ai ~
+      arousal +
+      danceability +
+      instrumentalness +
+      tempo +
+      valence,
+    data = compmus2025_filtered
+  ) |>
+  step_center(all_predictors()) |>
+  step_scale(all_predictors())      # Converts to z-scores.
+  # step_range(all_predictors())    # Sets range to [0, 1].
+
+compmus_cv <- compmus2025_filtered |> vfold_cv(5)
+
+knn_model <-
+  nearest_neighbor(neighbors = 1) |>
+  set_mode("classification") |> 
+  set_engine("kknn")
+classification_knn <- 
+  workflow() |> 
+  add_recipe(classification_recipe) |> 
+  add_model(knn_model) |> 
+  fit_resamples(compmus_cv, control = control_resamples(save_pred = TRUE))
+
+
+# Generate confusion matrices
+classification_knn |> get_conf_mat() |> autoplot(type = "heatmap")
+
+classification_knn |> get_conf_mat()
+
+classification_knn |> get_pr()
+
+```
+
+***
+Lets start by looking how many of the songs in the corpus are made by Gen-AI and how many are human made. One thing to note is that the data is normalized for better interpretative results. 
+These plots reveal how the nearest neighbors model classified the songs in our corpus. 
+As we can see here, it only has about a 60% precision, but to my surprise it is better at classifying AI made songs as AI made (with about 66% accuracy) then it does with human made music (60% accuracy). This can of course have multiple reasons, one could be that the class corpus consists of songs that all sound like they are created by AI. Another option could be that all AI generated songs are so good they are not as easily distinguishable from human made songs. Either way, we now have an idea what the corpus looks like.
+
+
+### Clustering
+```{r, randomforest}
+forest_model <-
+  rand_forest() |>
+  set_mode("classification") |> 
+  set_engine("ranger", importance = "impurity")
+indie_forest <- 
+  workflow() |> 
+  add_recipe(classification_recipe) |> 
+  add_model(forest_model) |> 
+  fit_resamples(
+    compmus_cv, 
+    control = control_resamples(save_pred = TRUE)
+  )
+
+indie_forest |> get_pr()
+
+workflow() |> 
+  add_recipe(classification_recipe) |> 
+  add_model(forest_model) |> 
+  fit(compmus2025_filtered) |> 
+  pluck("fit", "fit", "fit") |>
+  ranger::importance() |> 
+  enframe() |> 
+  mutate(name = fct_reorder(name, value)) |> 
+  ggplot(aes(name, value)) + 
+  geom_col() + 
+  coord_flip() +
+  theme_minimal() +
+  labs(x = NULL, y = "Importance")
+```
+
+***
+Next, a random forest model is used to cluster the songs in the corpus based on the features arousal, danceability, instrumentalness, tempo and valence. In this bar chart we can see the importance of each of these features. 
+
+
+
+### Dendrogram
+```{r, week 12}
+
+cluster_juice <-
+  recipe(
+    filename ~
+      arousal +
+      danceability +
+      instrumentalness +
+      tempo +
+      valence,
+    data = compmus2025
+  ) |>
+  step_center(all_predictors()) |>
+  step_scale(all_predictors()) |> 
+  # step_range(all_predictors()) |> 
+  prep(compmus2025) |>
+  juice() |>
+  column_to_rownames("filename")
+
+compmus_dist <- dist(cluster_juice, method = "euclidean")
+compmus_dist |> 
+  hclust(method = "average") |> # Try single, average, and complete.
+  dendro_data() |>
+  ggdendrogram()
+```
+
+***
+With the features that were extracted, combined with the file names of the songs in the corpus, we can visualize these clusters. This is just to give an idea what is happening when clustering these.
+
+### Heatmap
+```{r, heatmap}
+heatmaply(
+  cluster_juice,
+  hclustfun = hclust,
+  hclust_method = "average",  # Change for single, average, or complete linkage.
+  dist_method = "euclidean"
+)
+```
+
+***
+This heatmap gives a better indication on how these clusters are made, hover over it with your mouse and you can see how much each feature contributes to each song. The light areas in the heatmap indicate high importance. In this plot, it is especially clear how the combination of features matters for the clusters obtained.
+
+
+### Arousel vs Valence
+```{r, arouselvalence}
+compmus2025_filtered |>
+  ggplot(aes(x = danceability, y = arousal, colour = ai, size = tempo)) +
+  geom_point(alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(
+    x = "Valence",
+    y = "Arousal",
+    size = "Tempo",
+    colour = "AI"
+  )
+```
+
+***
+When comparing Valence and arousal we see a general up trend. Meaning that a higher valence also has a higher arousal. This scatter plot also compares AI with non-AI generated songs, showing that Non-AI songs have a larger spread in this comparison. To me this makes sense, human artist often want to stand out and be different, while AI generated music (at least the songs in this corpus) are mostly generated by the same model(s), and since AI is not as musical as humans (yet), this results in less varied songs.
+Tempo does not seem to have any correlation with the arousal and valence as there are high and low tempo songs scattered through the entire plot. 
+
+
+### Novelty spectralgram
+
+```{r, novelty}
+novelty1.1 <- "features/Lucas-W-1.json" |>
+  compmus_energy_novelty() |> 
+  ggplot(aes(t, novelty)) +
+  geom_line() +
+  theme_minimal() +
+  labs(x = "Time (s)", y = "Energy Novelty")
+
+novelty1.2 <- "features/Lucas-W-2.json" |>
+  compmus_energy_novelty() |> 
+  ggplot(aes(t, novelty)) +
+  geom_line() +
+  theme_minimal() +
+  labs(x = "Time (s)", y = "Energy Novelty")
+
+subplot(novelty1.1, novelty1.2, nrows = 1, titleX = TRUE, titleY = TRUE)
+```
+
+***
+Lets start looking at two specific songs, the ones that I uploaded. First up is these energy novelty grams, both songs show one massive peak. When you listen to the songs at the timestamp that can be seen in the plot, it becomes clear that both peaks are just about exactly at the first major bass drop in the song. This makes sense since a lot happens here, making it the most interesting part of the song.
+
+### Tempogram
+
+```{r, tempogram}
+tempo1 <- "features/Lucas-W-1.json" |>
+  compmus_tempogram(window_size = 4, hop_size = 2, cyclic = FALSE) |>
+  ggplot(aes(x = time, y = bpm, fill = power)) +
+  geom_raster() +
+  scale_fill_viridis_c(guide = "none") +
+  labs(x = "Time (s)", y = "Tempo (BPM)") +
+  theme_classic()
+
+tempo2 <- "features/Lucas-W-2.json" |>
+  compmus_tempogram(window_size = 4, hop_size = 2, cyclic = FALSE) |>
+  ggplot(aes(x = time, y = bpm, fill = power)) +
+  geom_raster() +
+  scale_fill_viridis_c(guide = "none") +
+  labs(x = "Time (s)", y = "Tempo (BPM)") +
+  theme_classic()
+
+subplot(tempo1, tempo2, nrows = 1, titleX = TRUE, titleY = TRUE)
+```
+
+***
+These tempograms show the bpm of both songs, with the first song being 160bpm and the second song 165bpm. This is not all that interesting to see in a visualization since this can be counted by hand. The second and third line are merely twice and three times the actual tempo.
+
+
+### Chromagram
+
+```{r, chromagram}
+library(plotly)
+
+
+p1 <- "features/lucas-w-1.json" |>                           
+  compmus_chroma(norm = "identity") |>                 
+  ggplot(aes(x = time, y = pc, fill = value)) + 
+  geom_raster() +
+  scale_y_continuous(
+    breaks = 0:11,
+    minor_breaks = NULL,
+    labels = c("C", "C#|Db", "D", "D#|Eb",
+               "E", "F", "F#|Gb", "G",
+               "G#|Ab", "A", "A#|Bb", "B")
+  ) +
+  scale_fill_viridis_c(guide = "none") +
+  labs(x = "Time (s)", y = NULL, fill = NULL) +
+  theme_classic()
+
+p2 <- "features/lucas-w-2.json" |>                           
+  compmus_chroma(norm = "identity") |>                 
+  ggplot(aes(x = time, y = pc, fill = value)) + 
+  geom_raster() +
+  scale_y_continuous(
+    breaks = 0:11,
+    minor_breaks = NULL,
+    labels = c("C", "C#|Db", "D", "D#|Eb",
+               "E", "F", "F#|Gb", "G",
+               "G#|Ab", "A", "A#|Bb", "B")
+  ) +
+  scale_fill_viridis_c(guide = "none") +
+  labs(x = "Time (s)", y = NULL, fill = NULL) +
+  theme_classic()
+
+
+# Display them side by side (or you can stack them)
+subplot(p1, p2, nrows = 1, titleX = TRUE, titleY = TRUE)
+
+```
+
+***
+When looking at the chromagrams for each of my songs, a horizontal band is visible on the pitch class F for both songs, indicating that is their tonal center. 
+
+
+
+### Chordogram
+
+```{r, chordogramm}
+#      C     C#    D     Eb    E     F     F#    G     Ab    A     Bb    B
+major_chord <-
+  c(   1,    0,    0,    0,    1,    0,    0,    1,    0,    0,    0,    0)
+minor_chord <-
+  c(   1,    0,    0,    1,    0,    0,    0,    1,    0,    0,    0,    0)
+seventh_chord <-
+  c(   1,    0,    0,    0,    1,    0,    0,    1,    0,    0,    1,    0)
+
+major_key <-
+  c(6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+minor_key <-
+  c(6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+
+chord_templates <-
+  tribble(
+    ~name, ~template,
+    "Gb:7", circshift(seventh_chord, 6),
+    "Gb:maj", circshift(major_chord, 6),
+    "Bb:min", circshift(minor_chord, 10),
+    "Db:maj", circshift(major_chord, 1),
+    "F:min", circshift(minor_chord, 5),
+    "Ab:7", circshift(seventh_chord, 8),
+    "Ab:maj", circshift(major_chord, 8),
+    "C:min", circshift(minor_chord, 0),
+    "Eb:7", circshift(seventh_chord, 3),
+    "Eb:maj", circshift(major_chord, 3),
+    "G:min", circshift(minor_chord, 7),
+    "Bb:7", circshift(seventh_chord, 10),
+    "Bb:maj", circshift(major_chord, 10),
+    "D:min", circshift(minor_chord, 2),
+    "F:7", circshift(seventh_chord, 5),
+    "F:maj", circshift(major_chord, 5),
+    "A:min", circshift(minor_chord, 9),
+    "C:7", circshift(seventh_chord, 0),
+    "C:maj", circshift(major_chord, 0),
+    "E:min", circshift(minor_chord, 4),
+    "G:7", circshift(seventh_chord, 7),
+    "G:maj", circshift(major_chord, 7),
+    "B:min", circshift(minor_chord, 11),
+    "D:7", circshift(seventh_chord, 2),
+    "D:maj", circshift(major_chord, 2),
+    "F#:min", circshift(minor_chord, 6),
+    "A:7", circshift(seventh_chord, 9),
+    "A:maj", circshift(major_chord, 9),
+    "C#:min", circshift(minor_chord, 1),
+    "E:7", circshift(seventh_chord, 4),
+    "E:maj", circshift(major_chord, 4),
+    "G#:min", circshift(minor_chord, 8),
+    "B:7", circshift(seventh_chord, 11),
+    "B:maj", circshift(major_chord, 11),
+    "D#:min", circshift(minor_chord, 3)
+  )
+
+key_templates <-
+  tribble(
+    ~name, ~template,
+    "Gb:maj", circshift(major_key, 6),
+    "Bb:min", circshift(minor_key, 10),
+    "Db:maj", circshift(major_key, 1),
+    "F:min", circshift(minor_key, 5),
+    "Ab:maj", circshift(major_key, 8),
+    "C:min", circshift(minor_key, 0),
+    "Eb:maj", circshift(major_key, 3),
+    "G:min", circshift(minor_key, 7),
+    "Bb:maj", circshift(major_key, 10),
+    "D:min", circshift(minor_key, 2),
+    "F:maj", circshift(major_key, 5),
+    "A:min", circshift(minor_key, 9),
+    "C:maj", circshift(major_key, 0),
+    "E:min", circshift(minor_key, 4),
+    "G:maj", circshift(major_key, 7),
+    "B:min", circshift(minor_key, 11),
+    "D:maj", circshift(major_key, 2),
+    "F#:min", circshift(minor_key, 6),
+    "A:maj", circshift(major_key, 9),
+    "C#:min", circshift(minor_key, 1),
+    "E:maj", circshift(major_key, 4),
+    "G#:min", circshift(minor_key, 8),
+    "B:maj", circshift(major_key, 11),
+    "D#:min", circshift(minor_key, 3)
+  )
+
+data1 <- compmus_chroma("features/lucas-w-1.json", norm = "identity") %>%
+  compmus_match_pitch_templates(
+    key_templates,         
+    norm = "identity",       
+    distance = "cosine") 
+  
+chord1 <- ggplot(data1, aes(x = time, y = name, fill = d)) + 
+  geom_raster() +
+  scale_fill_viridis_c(guide = "none") +               # Change the colours?
+  labs(x = "Time (s)", y = "Template", fill = NULL) +
+  theme_classic()  
+
+data2 <- compmus_chroma("features/lucas-w-2.json", norm = "identity") %>%
+  compmus_match_pitch_templates(
+    key_templates,         
+    norm = "identity",       
+    distance = "cosine") 
+  
+chord2 <- ggplot(data2, aes(x = time, y = name, fill = d)) + 
+  geom_raster() +
+  scale_fill_viridis_c(guide = "none") +               # Change the colours?
+  labs(x = "Time (s)", y = "Template", fill = NULL) +
+  theme_classic()
+  
+
+
+subplot(chord1, chord2, nrows = 1, titleX = TRUE, titleY = TRUE)
+```
+
+
+***
+As can be seen in the plots, both songs are not really in one chord. I expected this because they are Hard-Techno tracks, which dont follow regular music principles. 
+
+Both songs mainly have vertical bands across the whole song, indicating that the sound hits all chords at the same time, meaning no true chords were found. We see the major blue vertical lines at the places where the beat 'drops'. This would make sense since that is the place in the song where the least amount of variability is found, since there is only a bassline playing at those times.
+
+
+### Conclusion
+
+Here I will conclude my research on the chosen music. 
+
